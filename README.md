@@ -62,14 +62,15 @@ Only the answer plus EOS is supervised after native media expansion.
 
 Freeze all pretrained Thinker weights, including both encoders/projections;
 train language-layer LoRA with r=16, alpha=32, dropout=.05 and the original
-attention/MLP targets. Preserve the reference FP16/AMP runner policy; GPU
-numerical behavior is not yet verified. No custom precision policy is added.
-Expanded training sequences, INCLUDING chat/EOS, must fit 2048. Inference
+attention/MLP targets. Load the Thinker in BF16 and use BF16 CUDA autocast in
+the model adapter. The launcher's original config override `run.amp=False`
+disables the reference FP16 autocast/scaler without editing its runner.
+Expanded training sequences, INCLUDING chat/EOS, must fit 4096. Inference
 requires input+1200 output budget <=4096. Overflow fails; no media/answer is
 cut by the interface. The original Dataset's item function is called through a
 text-serialization view: it keeps annotation lookup, hybrid QA choice, answer
 suffix and masks, but tokenizes complete text and defers the legacy 1024 check
-to the final native 2048 check. Length overflow escapes from the collater instead
+to the final native 4096 check. Length overflow escapes from the collater instead
 of entering the Dataset's random-replacement handler. Original retries for
 other annotation/data errors remain. Source Dataset code and YAML stay intact.
 
@@ -88,8 +89,13 @@ python "Experiment/SFT Base Model Training/run_affectgpt_omni.py" evaluate --run
 Use a fresh original AffectGPT environment plus `requirements-omni.txt` and a
 working FFmpeg executable for its official audio loader. Supply original video
 files WITH audio, not only face/audio preprocessing products. The launcher
-rejects retired v1/v2 runtimes. It excludes author outputs from the execution
-copy. The preparation receipt records the source commit, workflow and dataset
+rejects retired v1/v2/v3 runtimes. It excludes author outputs from the execution
+copy and links `AffectGPT/models` to the original source's `models` directory.
+This link makes the separate scoring model available without installing the
+Omni model adapter during evaluation. Provision the original extraction model
+under source `models/Qwen2.5-7B-Instruct`; the link does not download weights.
+Directory symlinks require Developer Mode/admin on Windows; the GPU runtime is Linux.
+The preparation receipt records the source commit, workflow, models and dataset
 path; the exact model revision is pinned in the interface code.
 
 Inference supplies `--dataset inferenceData --zeroshot`, as in the original
@@ -99,6 +105,15 @@ options or a specific original dataset; the source YAML checkpoint-selection
 defaults are otherwise retained. No question or decoding setting is invented.
 Scoring has no CLI overrides and requires the original separate
 `models/Qwen2.5-7B-Instruct` extraction model and scoring dependencies.
+
+Training batch sizes default to the reference 3/3 per GPU. After OOM, use
+`train ... --batch-size-train 1` (or 2); `--batch-size-eval` controls the runner's
+evaluation batch size. These use AffectGPT's original `--options` configuration
+API. They do not change the standalone inference script's one-sample loop.
+`training-options.json` records the effective batch sizes, BF16 and 4096 capacity.
+Batch reduction changes the effective batch; gradient accumulation, learning
+rate and training duration are not automatically changed. There is no automatic
+OOM retry or target truncation. Use a fresh runtime for a new batch-size trial.
 
 ## Verification and reconstruction
 
@@ -114,5 +129,4 @@ environment versions and preparation receipt together. Reconstruct the same froz
 base and LoRA configuration before loading trained state. No retired v1/v2 checkpoint
 is accepted as a substitute for the corrected input interface. Historical
 reproduction notes retain their technical content with personal details removed;
-current AGENTS.md and adjustment.md override
-their obsolete three-component-replacement instructions.
+the project override now agrees with current AGENTS.md and adjustment.md.

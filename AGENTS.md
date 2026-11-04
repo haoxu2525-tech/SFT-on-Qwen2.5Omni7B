@@ -11,7 +11,8 @@ encoders out or retain AffectGPT projection, aggregation or fusion modules.
   explicitly requested by the user. Keep the other existing folders.
 - Preserve AffectGPT datasets, annotations, question/subtitle prose, target answers,
   hybrid supervision, runner/optimizer/scheduler,
-  batch sizes, duration, decoding, checkpoint selection and scoring.
+  duration, decoding, checkpoint selection and scoring. Batch sizes default to
+  reference 3/3; the user now authorizes explicit batch-size reduction after OOM.
 - Freeze the complete pretrained Thinker, including encoders and native
   projections; train language-layer LoRA with the reference LoRA settings.
 - Call the published qwen-omni-utils process_mm_info directly for ONE original
@@ -26,8 +27,12 @@ encoders out or retain AffectGPT projection, aggregation or fusion modules.
 - Keep BaseTask.train_step and runner unchanged; only model signature/data
   serialization/label masks/inference model calls belong in the interface.
 - The user authorized increased length capacity without reducing input or
-  supervision: training 2048; inference total 4096; output budget remains 1200.
+  supervision: training 4096; inference total 4096; output budget remains 1200.
   Fail explicitly if exceeded; never silently truncate media or target answers.
+- Latest user decision: load Thinker in BF16, use BF16 CUDA autocast in the
+  model adapter and disable original FP16 AMP/scaling through run.amp=False.
+  Keep official runner/task files unchanged. Link execution/models to the
+  original source/models so original scoring can access its extraction model.
 - Keep official source/configuration/author outputs unchanged at commit
   95b9257758df29fa6481c138252cdd317cce1735. Author results are not our results.
 - Preserve original datasets/annotations. Do not regenerate labels/splits,

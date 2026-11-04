@@ -22,12 +22,14 @@ Remember:
 10. There must exist discrepancies in availability to baseline papers as some files may require permission or be unopen to public route. List all the discrepancies carefully and wait for my decision about how we adjust our reproduction or experiment. These adjustments we make should be recorded in adjustment.md file.
 
 Current project override (2026-11-04):
-Replace only AffectGPT's language backbone and audio/visual encoders with
-Qwen2.5-Omni-7B's corresponding components. Keep AffectGPT's projection,
-aggregation and fusion modules, trainability policy, data, supervision,
-training settings and evaluation unchanged. This is not a language-LoRA-only
-or end-to-end Omni replacement. Native component interfaces may be adapted in
-the existing Experiment/Experiment Code directory without editing official files.
+Use the complete Qwen2.5-Omni-7B Thinker and native processor, including its
+encoders, projections and LLM. Do not use AffectGPT projection, aggregation or
+fusion modules. Freeze pretrained Thinker weights and train language-layer
+LoRA with AffectGPT's reference settings, data, supervision and evaluation.
+Interface code belongs in Experiment/SFT Base Model Training. Keep official
+files unchanged. The latest user instruction authorizes BF16, training capacity
+4096, explicit batch-size reduction after OOM, and a source models symlink.
+See Experiment/adjustment.md for the effective settings and validation limits.
 Any additional experimental change requires the project maintainer's decision. Preserve original
 datasets/annotations and do not reuse retired Qwen artifacts. Other folder,
 storage and version-control requirements above remain in force.

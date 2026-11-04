@@ -55,13 +55,16 @@ separate Qwen2.5-7B-Instruct extractor.
 
 Pretrained Thinker and both native projections remain frozen. Language LoRA
 uses reference r=16, alpha=32, dropout=.05 and explicit language-layer targets.
-Reference FP16/AMP is retained; it is not the pretrained config's BF16 default.
+The latest user instruction authorizes BF16 instead of reference FP16/AMP.
+Thinker loading uses torch.bfloat16. The model signature adapter uses BF16 CUDA
+autocast for forward/generate. The launcher passes run.amp=False through the
+original --options API, disabling FP16 autocast/scaling in the unchanged runner.
 No attention implementation/quantization/optimizer change is introduced.
 The torch 2.4 unused TP-metadata compatibility fix is retained.
 
 ## Capacity and isolation
 
-Training checks the complete native chat + target + EOS against 2048; inference
+Training checks the complete native chat + target + EOS against 4096; inference
 checks native prompt + original 1200 output budget against 4096. There is no
 new truncation/fallback. Full audio may exceed these budgets on long clips:
 fail and report rather than silently shorten it. The interface now calls the
@@ -70,14 +73,30 @@ annotation lookup, original QA methods/hybrid sampling and ordinary data-error
 retries to the original dataset. It changes only text serialization: no text
 truncation and no preliminary text-only capacity cutoff. The view's unbounded
 intermediate max_length is never passed to the tokenizer or model; the actual
-2048 limit is enforced after native media expansion, outside the source retry
+4096 limit is enforced after native media expansion, outside the source retry
 handler. The dataset object's max_length and the source YAML remain untouched.
-This implements the already authorized complete-input capacity requirement;
-it does not increase epochs, batch size, generation budget or alter labels.
+The user offered either target truncation or increased training capacity.
+We implement increased capacity (2048 to 4096), preserving complete answers
+and EOS. Inputs still exceeding 4096 fail explicitly; no unlimited fallback.
+Epochs, generation budget and labels remain unchanged.
 
-Fresh runtime workflow is `native-thinker-synchronized-av-v3`; v1/v2 receipts and
+Fresh runtime workflow is `native-thinker-synchronized-av-v4-bf16`; v1/v2/v3 receipts and
 artifacts are rejected. Preserve full checkpoint reconstruction information.
 Sync only scoped files directly to the new repository main; create no branches.
+
+The latest user instruction also authorizes adjustable batch size after OOM.
+The launcher accepts positive --batch-size-train and --batch-size-eval values
+for train, using original run.batch_size_train/eval config overrides. Defaults
+remain 3/3. Effective batch sizes and precision/capacity are recorded in
+training-options.json. Lower batches change the effective batch; no automatic
+gradient-accumulation/LR/duration adjustment or OOM retry is introduced.
+
+Execution models is now a symlink to source/models, as requested. This permits
+the unchanged evaluation scripts to load their separate Qwen2.5-7B-Instruct
+extractor without installing the Omni adapter. No weights are copied/downloaded
+by preparation, and a missing source models directory leaves a dangling link
+until provisioned. Wrong links or a conflicting real directory are rejected.
+Author output files remain excluded from the execution copy.
 
 ## Original inference entrypoint correction
 
@@ -139,13 +158,22 @@ was not checked in this local cleanup. No dataset or remote resource was changed
 
 ## Validation status
 
-Current v3 validation: 21 CPU tests passed in 14.99 seconds on 2026-11-04.
+Current v4 validation on 2026-11-04: 27 CPU tests passed, 3 skipped in 23.82s.
+New coverage includes BF16 tiny-Thinker forward/backward, LoRA updates and
+bitwise-equal checkpoint reconstruction, BF16 loader/autocast selection,
+complete >2048-token answers/subtitles within 4096, and batch override dispatch,
+recording and invalid-value rejection. Three real symlink integration cases
+were skipped because this Windows account lacks directory-symlink privileges
+(WinError 1314). Linux symlink integration and full 7B/CUDA execution remain
+unverified; the source models directory/weights must be provisioned there.
+
+Historical v3 validation: 21 CPU tests passed in 14.99 seconds on 2026-11-04.
 Real synthetic MOV containers with embedded audio, the published loader, a fresh
 copy of the pinned official processor (including chat_template.json), and a tiny
 native Thinker verify the native AV path, forward/generation, LoRA updates and
 bitwise-equal logits after checkpoint reconstruction. Additional regressions
 verify original description/ovlabel/hybrid selection and RNG consumption,
-complete >1024-token subtitles/answers that fit the final 2048 budget, explicit
+complete >1024-token subtitles/answers that fit the previous 2048 budget, explicit
 final overflow without random replacement, and the 4096/1200 inference boundary.
 The installed Dataset wrapper is exercised as well as the original train_step.
 Launcher tests intercept model download/script dispatch, execute the original

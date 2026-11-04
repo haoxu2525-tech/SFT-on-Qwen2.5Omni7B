@@ -2,6 +2,7 @@
 
 No encoder extraction, feature pooling, custom projector or replacement trainer.
 """
+from contextlib import nullcontext
 from functools import lru_cache
 from pathlib import Path
 import torch
@@ -11,7 +12,7 @@ from transformers import Qwen2_5OmniConfig, Qwen2_5OmniProcessor, Qwen2_5OmniThi
 MODEL_ID = "Qwen/Qwen2.5-Omni-7B"
 MODEL_REVISION = "ae9e1690543ffd5c0221dc27f79834d0294cba00"
 IGNORE_INDEX = -100
-TRAIN_MAX_LENGTH = 2048
+TRAIN_MAX_LENGTH = 4096
 INFERENCE_MAX_LENGTH = 4096
 MEDIA_MARKERS = ("<ImageHere>", "<FrameHere>", "<FaceHere>", "<AudioHere>", "<MultiHere>")
 VIDEO_FRAMES = 8
@@ -202,10 +203,19 @@ class AffectGPTThinker(torch.nn.Module):
         return self
 
     def forward(self, samples):
-        return {"loss": self.thinker(**thinker_inputs(self.thinker, samples["omni"])).loss}
+        # Launcher disables the reference FP16 scaler. Keep BF16 compute local
+        # to this adapter, without changing BaseTask or the runner.
+        with self.precision_context():
+            return {"loss": self.thinker(**thinker_inputs(self.thinker, samples["omni"])).loss}
+
+    def precision_context(self):
+        if self.device.type == "cuda":
+            return torch.autocast("cuda", dtype=torch.bfloat16)
+        return nullcontext()
 
     def generate(self, **kwargs):
-        return self.thinker.generate(**kwargs)
+        with self.precision_context():
+            return self.thinker.generate(**kwargs)
 
 
 def install(snapshot):
@@ -224,7 +234,7 @@ def install(snapshot):
         def from_config(cls, cfg):
             native = Qwen2_5OmniThinkerForConditionalGeneration.from_pretrained(
                 snapshot, config=load_thinker_config(snapshot),
-                local_files_only=True, torch_dtype=torch.float16,
+                local_files_only=True, torch_dtype=torch.bfloat16,
             )
             model = AffectGPTThinker(make_lora_model(native, cfg.get("lora_r", 16)))
             for key in ("ckpt", "ckpt_2", "ckpt_3"):

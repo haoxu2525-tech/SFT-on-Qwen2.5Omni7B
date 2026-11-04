@@ -14,7 +14,7 @@ import pytest
 import torch
 from transformers import Qwen2_5OmniThinkerForConditionalGeneration
 
-from omni_components import (MEDIA_MARKERS, SequenceLimitError, AffectGPTThinker,
+from omni_components import (MEDIA_MARKERS, TRAIN_MAX_LENGTH, SequenceLimitError, AffectGPTThinker,
     NativeTextSerialization,
     native_messages, collate_native, encode_prompt, load_processor,
     load_thinker_config, load_trainable_checkpoint, make_lora_model, thinker_inputs)
@@ -238,7 +238,8 @@ def test_original_item_preserves_supervision(processor, tokenizer, video, label_
 
 @pytest.mark.parametrize("long_field,words,overflows", [
     ("description", 1100, False), ("subtitle", 1100, False),
-    ("description", 2200, True),
+    ("description", 2200, False), ("subtitle", 2200, False),
+    ("description", 4300, True),
 ])
 def test_original_item_defers_capacity_without_truncation_or_replacement(
         processor, tokenizer, video, long_field, words, overflows):
@@ -261,16 +262,17 @@ def test_original_item_defers_capacity_without_truncation_or_replacement(
     expected_answer = ("happy " * words if long_field == "description" else "The person is happy.") + "###"
     assert tokenizer.decode(item["label"][item["label"] != -100]) == expected_answer
     if overflows:
-        with pytest.raises(SequenceLimitError, match="capacity=2048"):
-            collate_native(processor, tokenizer, [item], 2048)
+        with pytest.raises(SequenceLimitError, match="capacity=4096"):
+            collate_native(processor, tokenizer, [item], TRAIN_MAX_LENGTH)
     else:
-        batch = collate_native(processor, tokenizer, [item], 2048)["omni"]
+        batch = collate_native(processor, tokenizer, [item], TRAIN_MAX_LENGTH)["omni"]
         assert tokenizer.decode(batch["labels"][0][batch["labels"][0] != -100]) == expected_answer + tokenizer.eos_token
     assert reads == [0]
 
 
-def test_original_train_step_lora_and_checkpoint(processor, tokenizer, video, tmp_path):
-    model = AffectGPTThinker(tiny_model(processor)).train()
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_original_train_step_lora_and_checkpoint(processor, tokenizer, video, tmp_path, dtype):
+    model = AffectGPTThinker(make_lora_model(tiny_native(processor).to(dtype=dtype))).train()
     task_cls = original_class("my_affectgpt/tasks/base_task.py", "BaseTask",
                               dict(torch=torch, main_process=lambda f:f))
     batch = collate_native(processor, tokenizer, [sample(tokenizer,video)], 2048)
@@ -289,7 +291,7 @@ def test_original_train_step_lora_and_checkpoint(processor, tokenizer, video, tm
     state = {n:v for n,v in model.state_dict().items() if n not in params or params[n].requires_grad}
     path = tmp_path / "checkpoint.pth"
     torch.save({"model":state},path)
-    restored = AffectGPTThinker(tiny_model(processor))
+    restored = AffectGPTThinker(make_lora_model(tiny_native(processor).to(dtype=dtype)))
     load_trainable_checkpoint(restored,path)
     model.eval(); restored.eval()
     with torch.no_grad():
@@ -302,6 +304,37 @@ def test_original_train_step_lora_and_checkpoint(processor, tokenizer, video, tm
         load_trainable_checkpoint(restored,path)
 
 
+def test_adapter_selects_bf16_autocast(monkeypatch):
+    from contextlib import nullcontext
+    calls = []
+    def autocast(device_type, **kwargs):
+        calls.append((device_type, kwargs))
+        return nullcontext()
+    monkeypatch.setattr(torch, "autocast", autocast)
+    adapter = AffectGPTThinker(SimpleNamespace(device=torch.device("cuda")))
+    with adapter.precision_context():
+        pass
+    assert calls == [("cuda", {"dtype": torch.bfloat16})]
+
+
+@pytest.mark.parametrize("flags", [
+    ["train", "--batch-size-train", "0"],
+    ["train", "--batch-size-eval", "-1"],
+    ["infer", "--batch-size-train", "1"],
+])
+def test_batch_options_reject_invalid_requests(tmp_path, monkeypatch, flags):
+    import sys
+    import run_affectgpt_omni as launcher
+    def unexpected_prepare(*args):
+        pytest.fail("Invalid options must fail before preparing a runtime")
+    monkeypatch.setattr(launcher, "prepare_execution", unexpected_prepare)
+    monkeypatch.setattr(sys, "argv", ["launcher", *flags, "--runtime", str(tmp_path),
+                                    "--dataset-root", str(tmp_path)])
+    with pytest.raises(SystemExit) as error:
+        launcher.main()
+    assert error.value.code == 2
+
+
 def test_native_generate_passes_synchronization(processor, video):
     model = tiny_model(processor).eval()
     inputs = encode_prompt(processor,PROMPT,video)
@@ -312,7 +345,8 @@ def test_native_generate_passes_synchronization(processor, video):
     assert 1 <= output.shape[1]-n <= 2
 
 
-@pytest.mark.parametrize("retired_workflow", ["native-thinker-v1", "native-thinker-synchronized-av-v2"])
+@pytest.mark.parametrize("retired_workflow", ["native-thinker-v1", "native-thinker-synchronized-av-v2",
+                                            "native-thinker-synchronized-av-v3"])
 def test_execution_isolation(tmp_path, monkeypatch, retired_workflow):
     import run_affectgpt_omni as runner
     monkeypatch.setattr(runner.subprocess,"check_output",lambda args,**kwargs:SOURCE_COMMIT if "rev-parse" in args else "")
@@ -325,13 +359,32 @@ def test_execution_isolation(tmp_path, monkeypatch, retired_workflow):
     with pytest.raises(ValueError,match="fresh runtime"):
         prepare_execution(source,runtime,runtime/"dataset")
     receipt.write_text(json.dumps({"workflow":WORKFLOW}))
+    # Real filesystem integration: do not pretend a mocked link proves access.
+    probe = tmp_path / "symlink-probe"
+    try:
+        probe.symlink_to(source / "models", target_is_directory=True)
+    except OSError as error:
+        if getattr(error, "winerror", None) == 1314:
+            pytest.skip("Windows requires Developer Mode/admin for real directory symlinks")
+        raise
+    probe.unlink()
     execution=prepare_execution(source,runtime,runtime/"dataset")
     assert (execution/"my_affectgpt/models/affectgpt.py").is_file()
-    assert not (execution/"models").exists() and not (execution/"output/author.npz").exists()
+    assert (execution/"models").is_symlink()
+    assert (execution/"models").resolve() == (source/"models").resolve()
+    assert (execution/"models/weights.bin").read_text() == "models/weights.bin"
+    assert not (execution/"output/author.npz").exists()
+    assert prepare_execution(source,runtime,runtime/"dataset") == execution
+    # A pre-existing link to different model assets must not be accepted.
+    (execution/"models").unlink()
+    (execution/"models").symlink_to(runtime/"dataset", target_is_directory=True)
+    with pytest.raises(ValueError, match="Runtime models"):
+        prepare_execution(source,runtime,runtime/"dataset")
 
 
 @pytest.mark.parametrize("stage,extra", [
-    ("train", []), ("infer", []),
+    ("train", []), ("train", ["--batch-size-train", "1", "--batch-size-eval", "2"]),
+    ("infer", []),
     ("infer", ["--dataset", "MER2023", "--options", "inference.test_epoch=30"]),
     ("evaluate", []), ("score", []),
 ])
@@ -351,7 +404,8 @@ def test_launcher_dispatches_original_scripts(tmp_path, monkeypatch, stage, extr
     monkeypatch.setattr(bridge, "install", lambda snapshot: installs.append(snapshot))
     monkeypatch.setattr(launcher.runpy, "run_path", lambda path, **kwargs: calls.append((path, list(sys.argv))))
     monkeypatch.setattr(sys, "argv", ["launcher", stage, "--runtime", str(tmp_path),
-                                    "--dataset-root", str(tmp_path), "--", *extra])
+                                    "--dataset-root", str(tmp_path),
+                                    *([] if stage == "train" else ["--"]), *extra])
     launcher.main()
     path, argv = calls[0]
     assert Path(path) == SOURCE / launcher.SCRIPTS[stage]
@@ -361,7 +415,15 @@ def test_launcher_dispatches_original_scripts(tmp_path, monkeypatch, stage, extr
     assert installs == ["test-snapshot"]
     assert argv[1:3] == ["--cfg-path", launcher.REFERENCE_CONFIG]
     if stage == "train":
-        assert len(argv) == 3
+        expected = ["run.amp=False"]
+        if extra:
+            expected += ["run.batch_size_train=1", "run.batch_size_eval=2"]
+        assert argv[3:] == ["--options", *expected]
+        record = json.loads((tmp_path/"training-options.json").read_text())
+        assert record["precision"] == "bfloat16" and record["gradient_scaling"] is False
+        assert record["batch_size_train"] == (1 if extra else 3)
+        assert record["batch_size_eval"] == (2 if extra else 3)
+        assert record["train_max_length"] == TRAIN_MAX_LENGTH == 4096
         return
     # Execute the ACTUAL original argparse statements against dispatched argv.
     tree = ast.parse((SOURCE / "inference_hybird.py").read_text(encoding="utf-8"))
@@ -422,8 +484,11 @@ def test_install_preserves_task_and_inference_contract(processor, tokenizer, vid
     module("my_affectgpt.tasks.base_task",BaseTask=task_cls)
     conv = module("my_affectgpt.conversation.conversation_video",Chat=chat_cls)
     module("my_affectgpt.models.tokenizer",load_tokenizer_from_LLM=lambda _:tokenizer)
-    monkeypatch.setattr(bridge.Qwen2_5OmniThinkerForConditionalGeneration,"from_pretrained",
-                        lambda *args,**kwargs:tiny_native(processor))
+    load_calls = []
+    def load_native(*args, **kwargs):
+        load_calls.append(kwargs)
+        return tiny_native(processor)
+    monkeypatch.setattr(bridge.Qwen2_5OmniThinkerForConditionalGeneration,"from_pretrained",load_native)
     bridge.install(os.environ["OMNI_PROCESSOR_SNAPSHOT"])
     assert task_cls.train_step is original_step
     assert dataset_cls.get_qa_pairs is original_qa
@@ -444,6 +509,7 @@ def test_install_preserves_task_and_inference_contract(processor, tokenizer, vid
     assert tokenizer.decode(full_batch["labels"][0][full_batch["labels"][0] != -100]) == "happy " * 1100 + "###" + tokenizer.eos_token
     model = registry.mapping["model_name_mapping"]["affectgpt"].from_config({})
     assert isinstance(model,AffectGPTThinker)
+    assert load_calls[0]["torch_dtype"] == torch.bfloat16
     batch = dataset.collater([sample(tokenizer,video)])
     assert torch.isfinite(task_cls().train_step(model,batch))
     config = SimpleNamespace(llama_model="Qwen25",num_video_query_token=1,
