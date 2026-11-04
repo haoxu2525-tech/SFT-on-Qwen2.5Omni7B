@@ -14,7 +14,8 @@ import pytest
 import torch
 from transformers import Qwen2_5OmniThinkerForConditionalGeneration
 
-from omni_components import (MEDIA_MARKERS, SequenceLimitError, VideoSource, AffectGPTThinker,
+from omni_components import (MEDIA_MARKERS, SequenceLimitError, AffectGPTThinker,
+    NativeTextSerialization,
     native_messages, collate_native, encode_prompt, load_processor,
     load_thinker_config, load_trainable_checkpoint, make_lora_model, thinker_inputs)
 from run_affectgpt_omni import prepare_execution, SOURCE_COMMIT, WORKFLOW
@@ -75,7 +76,7 @@ def write_av(path, seconds=4, fps=8, audio=True, audio_offset=0):
                     out.mux(packet)
             for packet in sound.encode():
                 out.mux(packet)
-    return VideoSource(str(path))
+    return str(path)
 
 
 @pytest.fixture(scope="module")
@@ -199,14 +200,14 @@ def test_labels_padding_and_native_batch_forward(processor, tokenizer, video):
         collate_native(processor, tokenizer, items, 10)
 
 
-def test_original_item_preserves_supervision(processor, tokenizer, video):
+def reference_dataset(tokenizer, video):
     cfg = SimpleNamespace(IGNORE_INDEX=-100)
     for kind in ("IMAGE", "AUDIO", "FRAME", "FACE", "MULTI"):
         setattr(cfg, f"DEFAULT_{kind}_PATCH_TOKEN", f"<{kind.title()}Here>")
     cls = original_class("my_affectgpt/datasets/datasets/base_dataset.py", "BaseDataset", dict(torch=torch, random=random, config=cfg))
     dataset = cls.__new__(cls)
     dataset.annotation = [dict(name="synthetic", subtitle="I am fine.", description="The person is happy.", ovlabel="happy")]
-    dataset.label_type_candidates, dataset.label_type = ["description"], "description"
+    dataset.label_type_candidates, dataset.label_type = ["description", "ovlabel"], "description"
     dataset.dataset, dataset.face_or_frame = "MERCaptionPlus", "multiface_audio_face_text"
     dataset.max_length, dataset.tokenizer = 1024, tokenizer
     for kind in ("image", "video", "audio", "multi"):
@@ -215,9 +216,57 @@ def test_original_item_preserves_supervision(processor, tokenizer, video):
     media["raw_frame"] = video
     dataset.read_frame_face_audio_text = lambda *args: media
     dataset.get_prompt_for_multimodal = lambda mode, subtitle, question: cls.get_prompt_for_multimodal(dataset, "textonly", subtitle, question)
+    return dataset
+
+
+@pytest.mark.parametrize("label_type", ["description", "ovlabel", "hybird"])
+def test_original_item_preserves_supervision(processor, tokenizer, video, label_type):
+    dataset = reference_dataset(tokenizer, video)
+    dataset.label_type = label_type
+    rng = random.getstate()
     item = dataset[0]
-    batch = collate_native(processor, tokenizer, [item], 2048)["omni"]
-    assert tokenizer.decode(batch["labels"][0][batch["labels"][0] != -100]) == "The person is happy.###" + tokenizer.eos_token
+    after = random.getstate()
+    random.setstate(rng)
+    adapted = type(dataset).__getitem__(NativeTextSerialization(dataset), 0)
+    assert random.getstate() == after
+    assert torch.equal(item["text_input"], adapted["text_input"])
+    assert torch.equal(item["label"], adapted["label"])
+    batch = collate_native(processor, tokenizer, [adapted], 2048)["omni"]
+    expected = torch.cat((item["label"][item["label"] != -100], torch.tensor([tokenizer.eos_token_id])))
+    assert torch.equal(batch["labels"][0][batch["labels"][0] != -100], expected)
+
+
+@pytest.mark.parametrize("long_field,words,overflows", [
+    ("description", 1100, False), ("subtitle", 1100, False),
+    ("description", 2200, True),
+])
+def test_original_item_defers_capacity_without_truncation_or_replacement(
+        processor, tokenizer, video, long_field, words, overflows):
+    dataset = reference_dataset(tokenizer, video)
+    dataset.annotation[0][long_field] = "happy " * words
+    reads = []
+
+    class Annotations(list):
+        def __getitem__(self, index):
+            reads.append(index)
+            return super().__getitem__(index)
+
+    dataset.annotation = Annotations(dataset.annotation)
+    item = type(dataset).__getitem__(NativeTextSerialization(dataset), 0)
+    assert reads == [0]  # no exception/retry discarded the requested long row
+    assert dataset.max_length == 1024  # no mutation of original dataset/YAML
+    assert len(item["text_input"]) > 1024
+    decoded = tokenizer.decode(item["text_input"], clean_up_tokenization_spaces=False)
+    assert "happy " * words in decoded
+    expected_answer = ("happy " * words if long_field == "description" else "The person is happy.") + "###"
+    assert tokenizer.decode(item["label"][item["label"] != -100]) == expected_answer
+    if overflows:
+        with pytest.raises(SequenceLimitError, match="capacity=2048"):
+            collate_native(processor, tokenizer, [item], 2048)
+    else:
+        batch = collate_native(processor, tokenizer, [item], 2048)["omni"]
+        assert tokenizer.decode(batch["labels"][0][batch["labels"][0] != -100]) == expected_answer + tokenizer.eos_token
+    assert reads == [0]
 
 
 def test_original_train_step_lora_and_checkpoint(processor, tokenizer, video, tmp_path):
@@ -263,7 +312,8 @@ def test_native_generate_passes_synchronization(processor, video):
     assert 1 <= output.shape[1]-n <= 2
 
 
-def test_execution_isolation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("retired_workflow", ["native-thinker-v1", "native-thinker-synchronized-av-v2"])
+def test_execution_isolation(tmp_path, monkeypatch, retired_workflow):
     import run_affectgpt_omni as runner
     monkeypatch.setattr(runner.subprocess,"check_output",lambda args,**kwargs:SOURCE_COMMIT if "rev-parse" in args else "")
     source=tmp_path/"source"
@@ -271,13 +321,69 @@ def test_execution_isolation(tmp_path, monkeypatch):
         path=source/rel; path.parent.mkdir(parents=True,exist_ok=True); path.write_text(rel)
     runtime=tmp_path/"runtime"; runtime.mkdir(); (runtime/"dataset").mkdir()
     receipt=runtime/"preparation.json"
-    receipt.write_text(json.dumps({"workflow":"native-thinker-v1"}))
+    receipt.write_text(json.dumps({"workflow":retired_workflow}))
     with pytest.raises(ValueError,match="fresh runtime"):
         prepare_execution(source,runtime,runtime/"dataset")
     receipt.write_text(json.dumps({"workflow":WORKFLOW}))
     execution=prepare_execution(source,runtime,runtime/"dataset")
     assert (execution/"my_affectgpt/models/affectgpt.py").is_file()
     assert not (execution/"models").exists() and not (execution/"output/author.npz").exists()
+
+
+@pytest.mark.parametrize("stage,extra", [
+    ("train", []), ("infer", []),
+    ("infer", ["--dataset", "MER2023", "--options", "inference.test_epoch=30"]),
+    ("evaluate", []), ("score", []),
+])
+def test_launcher_dispatches_original_scripts(tmp_path, monkeypatch, stage, extra):
+    import argparse
+    import sys
+    import huggingface_hub
+    import omni_components as bridge
+    import run_affectgpt_omni as launcher
+    calls, installs = [], []
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    for key in ("HF_HOME", "HF_HUB_CACHE", "TRANSFORMERS_CACHE", "TORCH_HOME"):
+        monkeypatch.setenv(key, "test-before-launch")
+    monkeypatch.setattr(launcher, "prepare_execution", lambda *args: SOURCE)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda *args, **kwargs: "test-snapshot")
+    monkeypatch.setattr(bridge, "install", lambda snapshot: installs.append(snapshot))
+    monkeypatch.setattr(launcher.runpy, "run_path", lambda path, **kwargs: calls.append((path, list(sys.argv))))
+    monkeypatch.setattr(sys, "argv", ["launcher", stage, "--runtime", str(tmp_path),
+                                    "--dataset-root", str(tmp_path), "--", *extra])
+    launcher.main()
+    path, argv = calls[0]
+    assert Path(path) == SOURCE / launcher.SCRIPTS[stage]
+    if stage in {"evaluate", "score"}:
+        assert argv == [launcher.SCRIPTS[stage]] and installs == []
+        return
+    assert installs == ["test-snapshot"]
+    assert argv[1:3] == ["--cfg-path", launcher.REFERENCE_CONFIG]
+    if stage == "train":
+        assert len(argv) == 3
+        return
+    # Execute the ACTUAL original argparse statements against dispatched argv.
+    tree = ast.parse((SOURCE / "inference_hybird.py").read_text(encoding="utf-8"))
+    main = next(n for n in tree.body if isinstance(n, ast.If) and "__name__" in ast.unparse(n.test))
+    parser_nodes = []
+    for node in main.body:
+        parser_nodes.append(node)
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "args" for t in node.targets):
+            break
+    namespace = dict(argparse=argparse)
+    exec(compile(ast.Module(body=parser_nodes, type_ignores=[]), "original-inference-cli", "exec"), namespace)
+    args = namespace["args"]
+    assert args.dataset == ("MER2023" if extra else "inferenceData")
+    assert args.zeroshot is True and args.outside_user_message is None
+    assert args.options == (["inference.test_epoch=30"] if extra else None)
+    # Check original question selection reaches the existing dataset function.
+    node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "get_user_message")
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "original-question", "exec"), namespace)
+    selected = []
+    dataset = SimpleNamespace(func_get_qa_ovlabel=lambda **kwargs: selected.append(kwargs) or "original question")
+    assert namespace["get_user_message"](dataset, args.zeroshot, args.outside_user_message) == "original question"
+    assert selected == [dict(sample=None, question_only=True)]
 
 
 def test_install_preserves_task_and_inference_contract(processor, tokenizer, video, monkeypatch):
@@ -298,8 +404,11 @@ def test_install_preserves_task_and_inference_contract(processor, tokenizer, vid
         return obj
 
     cfg = SimpleNamespace(PATH_TO_LLM={"Qwen25":"unused"})
+    for kind in ("IMAGE", "AUDIO", "FRAME", "FACE", "MULTI"):
+        setattr(cfg, f"DEFAULT_{kind}_PATCH_TOKEN", f"<{kind.title()}Here>")
     dataset_cls = original_class("my_affectgpt/datasets/datasets/base_dataset.py", "BaseDataset",
                                  dict(torch=torch, random=random, config=cfg))
+    original_qa = dataset_cls.get_qa_pairs
     task_cls = original_class("my_affectgpt/tasks/base_task.py", "BaseTask", dict(torch=torch))
     original_step = task_cls.train_step
     namespace = dict(torch=torch, config=cfg, StoppingCriteria=StoppingCriteria,
@@ -317,12 +426,22 @@ def test_install_preserves_task_and_inference_contract(processor, tokenizer, vid
                         lambda *args,**kwargs:tiny_native(processor))
     bridge.install(os.environ["OMNI_PROCESSOR_SNAPSHOT"])
     assert task_cls.train_step is original_step
+    assert dataset_cls.get_qa_pairs is original_qa
     dataset = dataset_cls.__new__(dataset_cls)
-    dataset.tokenizer = tokenizer
-    media = dataset.read_frame_face_audio_text(video.path,"unused.npy","unused.wav",None)
+    dataset.__dict__.update(reference_dataset(tokenizer, video).__dict__)
+    # Exercise installed methods, not the direct-test media/prompt stubs.
+    del dataset.read_frame_face_audio_text
+    del dataset.get_prompt_for_multimodal
+    dataset._get_video_path = lambda sample: video
+    media = dataset.read_frame_face_audio_text(video,"unused.npy","unused.wav",None)
     assert media["raw_frame"] == video and media["raw_audio"] is None and media["raw_face"] is None
     prompt = dataset.get_prompt_for_multimodal("multiface_audio_face_text","I am fine.","What is the emotion?")
     assert prompt == PROMPT
+    dataset.annotation[0]["description"] = "happy " * 1100
+    item = dataset[0]
+    assert len(item["text_input"]) > 1024
+    full_batch = dataset.collater([item])["omni"]
+    assert tokenizer.decode(full_batch["labels"][0][full_batch["labels"][0] != -100]) == "happy " * 1100 + "###" + tokenizer.eos_token
     model = registry.mapping["model_name_mapping"]["affectgpt"].from_config({})
     assert isinstance(model,AffectGPTThinker)
     batch = dataset.collater([sample(tokenizer,video)])
@@ -330,6 +449,9 @@ def test_install_preserves_task_and_inference_contract(processor, tokenizer, vid
     config = SimpleNamespace(llama_model="Qwen25",num_video_query_token=1,
                              num_audio_query_token=1,num_multi_query_token=1,num_image_query_token=1)
     chat = conv.Chat(model,config,device="cpu")
+    for method in ("postprocess_audio", "postprocess_face", "postprocess_image", "postprocess_multi"):
+        assert getattr(conv.Chat, method) is getattr(chat_cls, method)
+    assert chat.postprocess_multi(None, None) == (None, None)
     img_list = {kind:getattr(chat,"postprocess_"+kind)(media)[1] for kind in ("audio","face","frame","image")}
     calls=[]
     def generate(**kwargs):
@@ -341,3 +463,10 @@ def test_install_preserves_task_and_inference_contract(processor, tokenizer, vid
     assert calls[0]["use_audio_in_video"] is True and calls[0]["max_new_tokens"] == 1200
     assert calls[0]["min_length"] == 1 and "min_new_tokens" not in calls[0]
     assert "pixel_values_videos" in calls[0] and "pixel_values" not in calls[0]
+    # Total inference budget includes every prompt token plus the original 1200.
+    monkeypatch.setattr(bridge, "encode_prompt", lambda *args: {"input_ids":torch.zeros((1,2896),dtype=torch.long)})
+    assert chat.answer_sample(prompt,img_list,max_new_tokens=1200) == "happy"
+    monkeypatch.setattr(bridge, "encode_prompt", lambda *args: {"input_ids":torch.zeros((1,2897),dtype=torch.long)})
+    with pytest.raises(SequenceLimitError, match="capacity 4096"):
+        chat.answer_sample(prompt,img_list,max_new_tokens=1200)
+    assert len(calls) == 2  # overflow never reaches generation

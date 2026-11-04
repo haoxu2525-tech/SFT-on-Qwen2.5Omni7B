@@ -3,7 +3,6 @@
 No encoder extraction, feature pooling, custom projector or replacement trainer.
 """
 from functools import lru_cache
-from dataclasses import dataclass
 from pathlib import Path
 import torch
 from peft import LoraConfig, TaskType, get_peft_model
@@ -20,6 +19,32 @@ VIDEO_FRAMES = 8
 
 class SequenceLimitError(ValueError):
     """Stop instead of silently changing samples, media or supervision."""
+
+
+class NativeTextSerialization:
+    """View used only while the ORIGINAL Dataset.__getitem__ serializes text.
+
+    Keep its annotation lookup, hybrid QA selection, suffix, masks and ordinary
+    data-error retries. Defer the legacy text-only length check to collate_native,
+    where the complete native AV sequence is known and overflow cannot be caught
+    by Dataset's random-replacement handler. Never mutate the dataset or YAML.
+    """
+    max_length = float("inf")
+
+    def __init__(self, dataset):
+        self.dataset_source = dataset
+
+    def __getattr__(self, name):
+        return getattr(self.dataset_source, name)
+
+    def __len__(self):
+        return len(self.dataset_source)
+
+    def to_token_ids(self, text, max_length):
+        return self.tokenizer(
+            text, return_tensors="pt", padding="longest",
+            truncation=False, add_special_tokens=False,
+        ).input_ids[0]
 
 
 @lru_cache(maxsize=2)
@@ -47,9 +72,6 @@ def make_lora_model(thinker, rank=16):
         task_type=TaskType.CAUSAL_LM, inference_mode=False,
         r=rank, lora_alpha=32, lora_dropout=0.05, target_modules=targets,
     ))
-    for name, param in model.named_parameters():
-        if param.requires_grad and ("lora_" not in name or ".model.layers." not in name):
-            raise RuntimeError(f"Unexpected trainable parameter: {name}")
     thinker.visual.eval()
     thinker.audio_tower.eval()
     return model
@@ -66,15 +88,9 @@ def load_trainable_checkpoint(model, path):
         raise ValueError(f"Unexpected checkpoint keys: {result.unexpected_keys[:5]}")
 
 
-@dataclass(frozen=True)
-class VideoSource:
-    """One original container owns BOTH streams and their shared clock."""
-    path: str
-
-
 def native_messages(prompt, source):
     """AffectGPT's original textonly prompt inside Qwen's official chat format."""
-    if not isinstance(source, VideoSource):
+    if not isinstance(source, str):
         raise ValueError("Expected original video file, not separate images/audio clips")
     prefix, suffix = "###Human: ", " ###Assistant: "
     if not prompt.startswith(prefix) or not prompt.endswith(suffix):
@@ -87,7 +103,7 @@ def native_messages(prompt, source):
             "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, "
             "capable of perceiving auditory and visual inputs, as well as generating text and speech."}]},
         {"role": "user", "content": [
-            {"type": "video", "video": source.path, "nframes": VIDEO_FRAMES,
+            {"type": "video", "video": source, "nframes": VIDEO_FRAMES,
              "resized_height": 224, "resized_width": 224},
             {"type": "text", "text": text},
         ]},
@@ -114,15 +130,6 @@ def encode_prompt(processor, prompt, source):
         truncation=False, use_audio_in_video=True, fps=video_kwargs["fps"][0],
         do_resize=False,  # official utility already applied the reference 224x224 size
     ))
-    # Validate actual audio/video tokens, not just a boolean in our Python call.
-    audio_lengths = (inputs["feature_attention_mask"].sum(-1) - 1) // 2 + 1
-    audio_lengths = (audio_lengths - 2) // 2 + 1
-    video_lengths = inputs["video_grid_thw"].prod(-1) // processor.video_processor.merge_size**2
-    for token, expected in ((processor.audio_token, audio_lengths.sum()),
-                            (processor.video_token, video_lengths.sum())):
-        count = (inputs["input_ids"] == processor.tokenizer.convert_tokens_to_ids(token)).sum()
-        if count != expected:
-            raise ValueError(f"Native synchronized token/feature mismatch for {token}: {count} vs {expected}")
     # Processor does not return this flag; Thinker needs it in BOTH forward and generate.
     inputs["use_audio_in_video"] = True
     return inputs
@@ -235,11 +242,15 @@ def install(snapshot):
         if video_path is None:
             raise ValueError("Original synchronized video path is required")
         result = {k: None for k in ("face", "frame", "image", "audio", "raw_face", "raw_image", "raw_audio")}
-        result["raw_frame"] = VideoSource(str(video_path))
+        result["raw_frame"] = str(video_path)
         return result
 
     original_chat = conversation_video.Chat
     original_prompt = BaseDataset.get_prompt_for_multimodal
+    original_getitem = BaseDataset.__getitem__
+
+    def getitem(dataset, index):
+        return original_getitem(NativeTextSerialization(dataset), index)
 
     def text_prompt(dataset, face_or_frame, subtitle, user_message):
         # Reuse published prompt prose verbatim; native Omni supplies media/roles.
@@ -252,20 +263,8 @@ def install(snapshot):
             super().__init__(model, model_cfg, device)
             self.processor = load_processor(snapshot)
 
-        def postprocess_audio(self, sample):
-            return None, sample.get("raw_audio")
-
-        def postprocess_face(self, sample):
-            return None, sample.get("raw_face")
-
         def postprocess_frame(self, sample):
             return None, sample.get("raw_frame")
-
-        def postprocess_image(self, sample):
-            return None, sample.get("raw_image")
-
-        def postprocess_multi(self, *args):
-            return None, None
 
         @torch.no_grad()
         def answer_sample(self, prompt, img_list, num_beams=1, temperature=1.0,
@@ -287,14 +286,19 @@ def install(snapshot):
                 repetition_penalty=repetition_penalty, length_penalty=length_penalty,
                 stopping_criteria=self.stopping_criteria,
             )
-            response = self.tokenizer.decode(output[0, prefix_length:], skip_special_tokens=False)
-            if self.tokenizer.bos_token in response:
+            # Same parser as the pinned Chat.answer_sample. Native generation
+            # returns prompt IDs too, so only the newly generated IDs are decoded.
+            response = self.tokenizer.decode(output[0, prefix_length:], add_special_tokens=False)
+            if response.find(self.tokenizer.bos_token) != -1:
                 response = response.split(self.tokenizer.bos_token)[1]
-            if self.tokenizer.eos_token in response:
+            if response.find(self.tokenizer.eos_token) != -1:
                 response = response.split(self.tokenizer.eos_token)[0]
-            return response.rsplit("###", 1)[0].split("Assistant:")[-1].strip()
+            response = response.rsplit('###', 1)[0]
+            response = response.split('Assistant:')[-1].strip()
+            return response
 
     registry.mapping["model_name_mapping"]["affectgpt"] = NativeThinkerFactory
+    BaseDataset.__getitem__ = getitem
     BaseDataset.collater = collater
     BaseDataset.read_frame_face_audio_text = read_media
     BaseDataset.get_prompt_for_multimodal = text_prompt

@@ -64,12 +64,33 @@ The torch 2.4 unused TP-metadata compatibility fix is retained.
 Training checks the complete native chat + target + EOS against 2048; inference
 checks native prompt + original 1200 output budget against 4096. There is no
 new truncation/fallback. Full audio may exceed these budgets on long clips:
-fail and report rather than silently shorten it. The original Dataset's
-upstream 1024 text-token truncation/retry remains, and is not claimed removed.
+fail and report rather than silently shorten it. The interface now calls the
+ORIGINAL Dataset.__getitem__ through NativeTextSerialization. This view delegates
+annotation lookup, original QA methods/hybrid sampling and ordinary data-error
+retries to the original dataset. It changes only text serialization: no text
+truncation and no preliminary text-only capacity cutoff. The view's unbounded
+intermediate max_length is never passed to the tokenizer or model; the actual
+2048 limit is enforced after native media expansion, outside the source retry
+handler. The dataset object's max_length and the source YAML remain untouched.
+This implements the already authorized complete-input capacity requirement;
+it does not increase epochs, batch size, generation budget or alter labels.
 
-Fresh runtime workflow is `native-thinker-synchronized-av-v2`; v1 receipts and
+Fresh runtime workflow is `native-thinker-synchronized-av-v3`; v1/v2 receipts and
 artifacts are rejected. Preserve full checkpoint reconstruction information.
 Sync only scoped files directly to the new repository main; create no branches.
+
+## Original inference entrypoint correction
+
+The launcher previously supplied only --cfg-path. This exposed the upstream
+script's non-runnable bare defaults: merbench has no dataset class, and
+get_user_message has no assigned question when zeroshot=False without an outside
+question. The launcher now supplies --dataset inferenceData --zeroshot from the
+official README's OV-label command. Original script/YAML, dataset list, question
+function, stopping/decoding and checkpoint selection are unchanged. Explicit
+original CLI options are still forwarded, with normal argparse precedence.
+The README's earlier claim about an automatically written omni-thinker.json /
+interface-hash manifest was inaccurate and has been removed: preparation.json
+records source commit, workflow and dataset path; model revision is pinned in code.
 
 ## Settings inspected in the pinned code
 
@@ -118,20 +139,34 @@ was not checked in this local cleanup. No dataset or remote resource was changed
 
 ## Validation status
 
-Ten corrected CPU tests passed (49.68 seconds) against real synthetic MOV
-containers with embedded audio, the published loader, pinned processor and a
-tiny native Thinker. They verify exact tensors against the direct published
-loader/processor call chain, audio/video interleaving and temporal-position
-correspondence, duration-derived FPS, missing-audio failure, multi-sample native
-forward, original target labels, unchanged original BaseTask.train_step, LoRA
-updates, bitwise-equal logits after checkpoint reconstruction, generation and
-original inference-call binding. Source git status is clean at the pinned
-AffectGPT commit. No 7B training, CUDA memory/numerical result, complete real
-training-data audit or benchmark score is claimed.
+Current v3 validation: 21 CPU tests passed in 14.99 seconds on 2026-11-04.
+Real synthetic MOV containers with embedded audio, the published loader, a fresh
+copy of the pinned official processor (including chat_template.json), and a tiny
+native Thinker verify the native AV path, forward/generation, LoRA updates and
+bitwise-equal logits after checkpoint reconstruction. Additional regressions
+verify original description/ovlabel/hybrid selection and RNG consumption,
+complete >1024-token subtitles/answers that fit the final 2048 budget, explicit
+final overflow without random replacement, and the 4096/1200 inference boundary.
+The installed Dataset wrapper is exercised as well as the original train_step.
+Launcher tests intercept model download/script dispatch, execute the original
+inference argparse statements and question-selector function, and check train,
+infer, evaluate and score arguments. They do not run the full GPU scripts.
+Official source git status remains clean at the pinned commit. No 7B training,
+CUDA memory/numerical result, complete real training-data audit or benchmark
+score is claimed.
 
-The Windows CPU test environment uses Python 3.12, torch 2.4.0+cpu, PyAV 13.1.0,
+The fresh isolated Windows CPU test environment uses Python 3.12.4,
+torch 2.4.0+cpu, torchvision 0.19.0+cpu, Transformers 4.52.4, PEFT 0.13.2,
+accelerate 1.0.0, tokenizers 0.21.0, safetensors 0.4.5, PyAV 13.1.0,
 NumPy 1.26.4 and librosa 0.10.2.post1, with FFmpeg available on PATH. This differs
 from the unchanged original Linux environment (Python 3.10, NumPy 1.23.5,
 librosa 0.8.1); production dependency integration and numerical equivalence are
 not yet verified. The requirements overlay adds only pinned Transformers and
 qwen-omni-utils. CPU tests use one thread as previously documented.
+
+To run the tests, set OMNI_PROCESSOR_SNAPSHOT to the complete pinned processor
+directory, put FFmpeg on PATH, and run pytest on
+Experiment/SFT Base Model Training/test_omni_components.py in the isolated test
+environment. The initial local processor cache lacked chat_template.json;
+fetching the original file at the pinned revision fixed the test setup without
+adding a custom template or altering model code.

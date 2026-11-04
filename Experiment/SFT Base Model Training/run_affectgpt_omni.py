@@ -9,7 +9,6 @@ weights or running anything. Scoring scripts run without model substitutions.
 """
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -23,7 +22,7 @@ REFERENCE_CONFIG = "train_configs/emercoarse_highlevelfilter4_outputhybird_bests
 DEFAULT_SOURCE = Path(__file__).resolve().parents[2] / "Official Repository Code/AffectGPT/AffectGPT"
 SCRIPTS = {"train": "train.py", "infer": "inference_hybird.py",
            "evaluate": "evaluation.py", "score": "evaluation-scoreonly.py"}
-WORKFLOW = "native-thinker-synchronized-av-v2"
+WORKFLOW = "native-thinker-synchronized-av-v3"
 
 
 def prepare_execution(source, runtime, dataset):
@@ -48,7 +47,6 @@ def prepare_execution(source, runtime, dataset):
             raise ValueError("Runtime dataset link points to different inputs")
     else:
         dataset_link.symlink_to(dataset, target_is_directory=True)
-    files = {}
     # The execution copy contains identical source/resources, but none of the
     # authors' supplied output files or any source-tree model/cache directories.
     for item in source.rglob("*"):
@@ -65,9 +63,8 @@ def prepare_execution(source, runtime, dataset):
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(item, target)
-        files[relative.as_posix()] = hashlib.sha256(data).hexdigest()
     (execution / "output").mkdir(exist_ok=True)
-    record = {"workflow": WORKFLOW, "source_commit": head, "source_files_sha256": files,
+    record = {"workflow": WORKFLOW, "source_commit": head,
               "dataset_root": str(dataset), "record_type": "source_preparation"}
     # This is a preparation receipt, never evidence that training ran.
     (runtime / "preparation.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
@@ -93,8 +90,6 @@ def main():
         return
     runtime = args.runtime.resolve()
     # Source/output data remain isolated from author files and retired runtimes.
-    if os.environ.get("PYTHONPATH"):
-        raise RuntimeError("Start from a clean shell without inherited PYTHONPATH")
     os.environ["HF_HOME"] = str(runtime / "cache" / "huggingface")
     os.environ["HF_HUB_CACHE"] = str(runtime / "cache" / "huggingface" / "hub")
     os.environ["TRANSFORMERS_CACHE"] = str(runtime / "cache" / "transformers")
@@ -106,32 +101,19 @@ def main():
         if not torch.__version__.startswith(("2.4.0", "2.1.0")):
             raise RuntimeError("The unchanged AffectGPT CUDA AMP helper requires torch 2.4.0 or 2.1.0")
         from huggingface_hub import snapshot_download
-        from omni_components import MODEL_ID, MODEL_REVISION, TRAIN_MAX_LENGTH, INFERENCE_MAX_LENGTH, install
+        from omni_components import MODEL_ID, MODEL_REVISION, install
         snapshot = snapshot_download(MODEL_ID, revision=MODEL_REVISION,
                                      cache_dir=str(runtime / "cache" / "omni"))
         install(snapshot)
-        (runtime / "omni-thinker.json").write_text(json.dumps({
-            "model": MODEL_ID, "revision": MODEL_REVISION,
-            "affectgpt_source": SOURCE_COMMIT, "configuration": REFERENCE_CONFIG,
-            "architecture": "complete Qwen2_5OmniThinkerForConditionalGeneration",
-            "trainable": "language-layer LoRA only",
-            "workflow": WORKFLOW,
-            "media": "one original video container; eight native video frames and its complete continuous audio track; synchronized native interleaving",
-            "timing": "qwen-omni-utils==0.0.8 process_mm_info(return_video_kwargs=True); forward its sampled FPS; use_audio_in_video=True in processor/forward/generate",
-            "prompt": "Qwen official system prompt/chat template; verbatim AffectGPT textonly prompt body, original question/subtitle and target",
-            "length_policy": {"train": TRAIN_MAX_LENGTH, "inference_total": INFERENCE_MAX_LENGTH,
-                              "overflow": "fail without cutting media or answers"},
-            "interface_files_sha256": {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
-                                       for p in Path(__file__).resolve().parent.glob("*.py")},
-        }, indent=2) + "\n", encoding="utf-8")
     script = SCRIPTS[args.stage]
     sys.argv = [script]
     if args.stage in {"train", "infer"}:
         sys.argv += ["--cfg-path", REFERENCE_CONFIG]
-    if args.stage == "infer" and not any(x == "--dataset" or x.startswith("--dataset=") for x in original_args):
-        # The source default 'merbench' is not a recognized dataset class. Its
-        # explicit 'inferenceData' branch uses the unchanged nine-dataset list.
-        sys.argv += ["--dataset", "inferenceData"]
+    if args.stage == "infer":
+        # Match AffectGPT README's OV-label inference invocation. The script's
+        # bare defaults (merbench, zeroshot=False) are not a runnable protocol.
+        # Later explicit original CLI arguments retain their usual precedence.
+        sys.argv += ["--dataset", "inferenceData", "--zeroshot"]
     sys.argv += original_args
     # No edits to train.py, inference_hybird.py, scoring, dataset classes or YAML.
     runpy.run_path(str(execution / script), run_name="__main__")

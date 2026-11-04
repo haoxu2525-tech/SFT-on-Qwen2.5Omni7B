@@ -66,8 +66,12 @@ attention/MLP targets. Preserve the reference FP16/AMP runner policy; GPU
 numerical behavior is not yet verified. No custom precision policy is added.
 Expanded training sequences, INCLUDING chat/EOS, must fit 2048. Inference
 requires input+1200 output budget <=4096. Overflow fails; no media/answer is
-cut by the new interface. The upstream original Dataset still has its own
-1024 text-token truncation/retry behavior. These are distinct limits.
+cut by the interface. The original Dataset's item function is called through a
+text-serialization view: it keeps annotation lookup, hybrid QA choice, answer
+suffix and masks, but tokenizes complete text and defers the legacy 1024 check
+to the final native 2048 check. Length overflow escapes from the collater instead
+of entering the Dataset's random-replacement handler. Original retries for
+other annotation/data errors remain. Source Dataset code and YAML stay intact.
 
 ## Checkout and run
 
@@ -84,12 +88,16 @@ python "Experiment/SFT Base Model Training/run_affectgpt_omni.py" evaluate --run
 Use a fresh original AffectGPT environment plus `requirements-omni.txt` and a
 working FFmpeg executable for its official audio loader. Supply original video
 files WITH audio, not only face/audio preprocessing products. The launcher
-rejects the retired v1 runtime. It excludes author outputs from the execution
-copy and records pinned source/model revisions and interface hashes.
+rejects retired v1/v2 runtimes. It excludes author outputs from the execution
+copy. The preparation receipt records the source commit, workflow and dataset
+path; the exact model revision is pinned in the interface code.
 
-Inference selects the original `inferenceData` group by default because the
-source default `merbench` has no dataset class. Its CLI arguments can follow
-`--`. Scoring has no CLI overrides and requires the original separate
+Inference supplies `--dataset inferenceData --zeroshot`, as in the original
+README's OV-label invocation. The source's bare `merbench`/non-zeroshot defaults
+are not runnable. Original CLI arguments can follow `--`, including checkpoint
+options or a specific original dataset; the source YAML checkpoint-selection
+defaults are otherwise retained. No question or decoding setting is invented.
+Scoring has no CLI overrides and requires the original separate
 `models/Qwen2.5-7B-Instruct` extraction model and scoring dependencies.
 
 ## Verification and reconstruction
@@ -102,8 +110,8 @@ LoRA updates and checkpoint reconstruction. This is not 7B/GPU training or an
 evaluation result. See `Experiment/adjustment.md` for test status/limitations.
 
 Preserve runner checkpoints, exact Omni revision and processor, interface code,
-environment versions and `omni-thinker.json`. Reconstruct the same frozen base
-and LoRA configuration before loading trained state. No retired v1 checkpoint
+environment versions and preparation receipt together. Reconstruct the same frozen
+base and LoRA configuration before loading trained state. No retired v1/v2 checkpoint
 is accepted as a substitute for the corrected input interface. Historical
 reproduction notes remain verbatim; current AGENTS.md and adjustment.md override
 their obsolete three-component-replacement instructions.
