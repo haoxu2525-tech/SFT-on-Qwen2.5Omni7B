@@ -2,78 +2,74 @@
 
 Updated 2026-11-04 (Australia/Sydney).
 
-## Current user decision
+## Required correction: published Omni audio/video path
 
-Use the complete official Qwen2.5-Omni-7B Thinker and native processor with
-AffectGPT's original datasets, prompt prose, target labels, hybrid supervision,
-training recipe, test membership and scoring scripts. Remove the AffectGPT
-projection/aggregation/fusion model entirely. Freeze all pretrained Thinker
-parameters (including visual merger and audio output projection); train only
-language-layer LoRA using the reference rank/alpha/dropout/targets.
+The user rejected the independent-image/independent-audio representation and
+explicitly required the complete native Thinker and published upstream code.
+The earlier v1 implementation is retired. Its eight passing interface tests
+were insufficient: they did not verify synchronized video/audio behavior.
 
-This explicitly supersedes the earlier prohibition on full Thinker replacement.
-The user chose `Experiment/SFT Base Model Training` as the code location. The
-old `Experiment/Experiment Code` folder remains; its four untracked draft files
-were rewritten/moved, not imported as a trained model or historical Qwen output.
+Use `qwen-omni-utils==0.0.8` directly, without editing/copying/reimplementing its
+loader. `process_mm_info(..., use_audio_in_video=True, return_video_kwargs=True)`
+extracts video and continuous embedded audio from the SAME original file.
+Native `processor.apply_chat_template`, processor token interleaving, Thinker
+forward/generate and native positional computation are retained. The boolean
+must be passed to both processor and model. The reference eight-frame/224x224
+budget is passed through supported official utility options. Its sampled FPS
+is forwarded unchanged; scalar unwrapping is required by Transformers 4.52.4.
+The resized video is not resized again by the processor.
 
-## Interface behavior
+No handwritten PyAV decoder, audio clipping/resampling rule, timestamp matching
+policy, feature pooling, projector, encoder replacement or fusion layer remains.
+Any media behavior/limitations are those of the pinned published utility. In
+particular, this does not prove arbitrary variable-frame-rate or stream-offset
+support. Missing embedded audio errors instead of falling back to unrelated
+WAVs or claiming unverified synchronization.
 
-- Load `Qwen2_5OmniThinkerForConditionalGeneration` directly and retain both
-  encoders and native projections inside it. No custom feature pooling or
-  AffectGPT model constructor runs.
-- Keep original dataset readers and sampling. The current reference supplies
-  eight 224-pixel face images and eight independently sampled two-second audio
-  clips. Serialize these as independent images/audios through the processor.
-  No new FPS, AV alignment, whole-video resampling or concatenated waveform is
-  invented. Native media positions are computed by Thinker.
-- Preserve original natural-language prompt characters and target token IDs.
-  Replace `<FaceHere>`/`<AudioHere>` etc. with native media markers. Remove only
-  `<MultiHere>`, which no longer has an external fused feature. Its surrounding
-  original prose and `<Multi></Multi>` wrapper remain. Do not add a new system
-  prompt or apply a different chat template to the original prompt prose.
-- Rebuild answer-only labels after processor expansion. Keep the original
-  BOS/EOS convention, target `###` suffix and padding-label behavior.
-- Bind original Task.train_step and Chat calls to native forward/generate.
-  Keep the original runner, optimizer groups, scheduler, loop, inference
-  datasets, checkpoint selection, stopping criteria, parser and NPZ schema.
-- Keep the official repository and YAML unchanged. Runtime manifests record
-  the native model revision, interface hashes and effective capacity settings.
-- Inference explicitly selects the source's `inferenceData` branch by default
-  (its literal default `merbench` has no corresponding dataset class), retaining
-  all nine original benchmarks. Scoring runs the untouched main programs with
-  their original result discovery. It still requires the separate official
-  Qwen2.5-7B-Instruct extraction model at the original configured local path;
-  it does not use the fine-tuned Thinker as a replacement judge/extractor.
+This explicitly changes media representation from face crops + eight sampled
+clips to original video frames + full continuous embedded audio. Annotation
+membership, subtitles, questions, answers and scoring references are retained.
+Do not claim exact preservation of original sampled pixels/waveform segments.
+No source media, annotation, split, exclusion or original checkpoint is changed.
 
-## Authorized sequence capacity change
+## Prompt, supervision and original code boundary
 
-A real pinned processor measurement with the original prompt function, subtitle
-`I am fine.`, eight 224x224 images and eight 32000-sample clips produced 1038
-input tokens before any answer. There are 512 visual and 400 audio feature
-positions, plus markers and prompt text. This is a synthetic interface example,
-not a dataset-wide length measurement or a training result.
+Call the original AffectGPT `get_prompt_for_multimodal(..., 'textonly', ...)`
+branch for its existing subtitle/question prose, then replace ONLY its old
+Human/Assistant role envelope with the native Omni chat template. The actual
+sample is NOT text-only: a native video message supplies the paired AV input.
+The Qwen official example's system prompt is used verbatim. Original hybrid
+supervision and answer suffix `###` are kept; answer labels are relocated after
+native media expansion. Native role tokens already contain BOS; do not add a
+second legacy BOS. Padding masks are based on actual row lengths, retaining EOS
+attention and avoiding an accidental EOS-as-padding interpretation.
 
-The user instructed: adjust capacity without reducing training content.
-Native expanded training capacity is therefore 2048 tokens before the original
-BOS/EOS additions; inference total capacity is 4096 with the original 1200
-new-token budget. Sampling, image size, prompt prose, target answers, batch
-sizes and training duration are unchanged. Original dataset text-token checks
-remain as in the reference; the increased limit is applied after native media
-expansion. An overflow beyond these capacities raises an explicit error instead
-of cutting media/answers or silently selecting a different training example.
-Increasing capacity is not a guarantee of identical final evaluation scores.
+`BaseTask.train_step` is no longer monkey-patched. A model signature wrapper
+accepts its exact `model(samples)['loss']` contract. BaseDataset's media input,
+prompt serialization and collater are interface bindings only. The original
+training loop, optimizer/scheduler, backward, checkpoint writer, inference
+iteration, stopping criteria, response parser, membership and metric scripts
+remain unchanged on disk. Inference uses the source's `min_length` argument,
+not a silently substituted `min_new_tokens`. Scoring still uses the original
+separate Qwen2.5-7B-Instruct extractor.
 
-## Runtime compatibility
+Pretrained Thinker and both native projections remain frozen. Language LoRA
+uses reference r=16, alpha=32, dropout=.05 and explicit language-layer targets.
+Reference FP16/AMP is retained; it is not the pretrained config's BF16 default.
+No attention implementation/quantization/optimizer change is introduced.
+The torch 2.4 unused TP-metadata compatibility fix is retained.
 
-Use a fresh environment, caches and outputs. Transformers 4.52.4 supplies the
-native Thinker missing from reference 4.49.0. Other reference runtime pins are
-retained. On torch 2.4.0, disable the config's unused tensor-parallel placement
-plan: Transformers 4.52.4 otherwise checks it against an unavailable registry.
-This changes no layers/weights or math; the original runner uses DDP, not TP.
+## Capacity and isolation
 
-The isolated Windows CPU tests pin one CPU thread because repeated tiny-model
-audio-attention evaluation varied with two threads on this torch 2.4 build.
-This is a test setting, not a change to the CUDA training implementation.
+Training checks the complete native chat + target + EOS against 2048; inference
+checks native prompt + original 1200 output budget against 4096. There is no
+new truncation/fallback. Full audio may exceed these budgets on long clips:
+fail and report rather than silently shorten it. The original Dataset's
+upstream 1024 text-token truncation/retry remains, and is not claimed removed.
+
+Fresh runtime workflow is `native-thinker-synchronized-av-v2`; v1 receipts and
+artifacts are rejected. Preserve full checkpoint reconstruction information.
+Sync only scoped files directly to the new repository main; create no branches.
 
 ## Settings inspected in the pinned code
 
@@ -122,17 +118,20 @@ was not checked in this local cleanup. No dataset or remote resource was changed
 
 ## Validation status
 
-Eight CPU integration tests passed with the pinned real processor/tokenizer and
-a tiny complete native Thinker (torch 2.4.0+cpu, Transformers 4.52.4, PEFT 0.13.2).
-They verify media ordering/counts, answer-only masks, original prompt/label
-functions, explicit overflow, frozen weights, a language-LoRA optimizer step,
-bitwise-equal logits after checkpoint reconstruction, native generation, script
-call bindings and source-copy exclusions. No new 7B training, GPU smoke run,
-benchmark inference or scoring result is claimed. Original datasets and
-author outputs remain preserved. Full fresh-runtime dependency integration,
-actual training-data coverage and CUDA memory use still require verification.
+Ten corrected CPU tests passed (49.68 seconds) against real synthetic MOV
+containers with embedded audio, the published loader, pinned processor and a
+tiny native Thinker. They verify exact tensors against the direct published
+loader/processor call chain, audio/video interleaving and temporal-position
+correspondence, duration-derived FPS, missing-audio failure, multi-sample native
+forward, original target labels, unchanged original BaseTask.train_step, LoRA
+updates, bitwise-equal logits after checkpoint reconstruction, generation and
+original inference-call binding. Source git status is clean at the pinned
+AffectGPT commit. No 7B training, CUDA memory/numerical result, complete real
+training-data audit or benchmark score is claimed.
 
-For reconstruction, retain the exact official Omni revision, processor/tokenizer,
-interface files, runtime dependency record and original runner checkpoints
-containing language LoRA plus optimizer/scaler state. Never substitute retired
-Qwen artifacts or mix author outputs with this model's results.
+The Windows CPU test environment uses Python 3.12, torch 2.4.0+cpu, PyAV 13.1.0,
+NumPy 1.26.4 and librosa 0.10.2.post1, with FFmpeg available on PATH. This differs
+from the unchanged original Linux environment (Python 3.10, NumPy 1.23.5,
+librosa 0.8.1); production dependency integration and numerical equivalence are
+not yet verified. The requirements overlay adds only pinned Transformers and
+qwen-omni-utils. CPU tests use one thread as previously documented.

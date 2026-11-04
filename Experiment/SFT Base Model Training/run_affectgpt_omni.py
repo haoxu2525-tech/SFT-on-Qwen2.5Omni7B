@@ -23,6 +23,7 @@ REFERENCE_CONFIG = "train_configs/emercoarse_highlevelfilter4_outputhybird_bests
 DEFAULT_SOURCE = Path(__file__).resolve().parents[2] / "Official Repository Code/AffectGPT/AffectGPT"
 SCRIPTS = {"train": "train.py", "infer": "inference_hybird.py",
            "evaluate": "evaluation.py", "score": "evaluation-scoreonly.py"}
+WORKFLOW = "native-thinker-synchronized-av-v2"
 
 
 def prepare_execution(source, runtime, dataset):
@@ -39,7 +40,7 @@ def prepare_execution(source, runtime, dataset):
     dataset_link = runtime / "dataset"
     receipt = runtime / "preparation.json"
     if runtime.exists() and any(runtime.iterdir()):
-        if not receipt.is_file() or json.loads(receipt.read_text()).get("workflow") != "native-thinker-v1":
+        if not receipt.is_file() or json.loads(receipt.read_text()).get("workflow") != WORKFLOW:
             raise ValueError("Use a fresh runtime for native Thinker; existing artifacts are not imported")
     runtime.mkdir(parents=True, exist_ok=True)
     if dataset_link.exists() or dataset_link.is_symlink():
@@ -66,7 +67,7 @@ def prepare_execution(source, runtime, dataset):
             shutil.copyfile(item, target)
         files[relative.as_posix()] = hashlib.sha256(data).hexdigest()
     (execution / "output").mkdir(exist_ok=True)
-    record = {"workflow": "native-thinker-v1", "source_commit": head, "source_files_sha256": files,
+    record = {"workflow": WORKFLOW, "source_commit": head, "source_files_sha256": files,
               "dataset_root": str(dataset), "record_type": "source_preparation"}
     # This is a preparation receipt, never evidence that training ran.
     (runtime / "preparation.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
@@ -114,8 +115,10 @@ def main():
             "affectgpt_source": SOURCE_COMMIT, "configuration": REFERENCE_CONFIG,
             "architecture": "complete Qwen2_5OmniThinkerForConditionalGeneration",
             "trainable": "language-layer LoRA only",
-            "media": "original sampled frames as images; original audio clips separately",
-            "prompt": "original natural-language text; model placeholders serialized by Omni processor",
+            "workflow": WORKFLOW,
+            "media": "one original video container; eight native video frames and its complete continuous audio track; synchronized native interleaving",
+            "timing": "qwen-omni-utils==0.0.8 process_mm_info(return_video_kwargs=True); forward its sampled FPS; use_audio_in_video=True in processor/forward/generate",
+            "prompt": "Qwen official system prompt/chat template; verbatim AffectGPT textonly prompt body, original question/subtitle and target",
             "length_policy": {"train": TRAIN_MAX_LENGTH, "inference_total": INFERENCE_MAX_LENGTH,
                               "overflow": "fail without cutting media or answers"},
             "interface_files_sha256": {p.name: hashlib.sha256(p.read_bytes()).hexdigest()

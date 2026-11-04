@@ -9,13 +9,22 @@ encoders out or retain AffectGPT projection, aggregation or fusion modules.
 
 - SFT base-model code belongs in Experiment/SFT Base Model Training, the folder
   explicitly requested by the user. Keep the other existing folders.
-- Preserve AffectGPT datasets, annotations, sampled media, natural-language
-  prompts, target answers, hybrid supervision, runner/optimizer/scheduler,
+- Preserve AffectGPT datasets, annotations, question/subtitle prose, target answers,
+  hybrid supervision, runner/optimizer/scheduler,
   batch sizes, duration, decoding, checkpoint selection and scoring.
 - Freeze the complete pretrained Thinker, including encoders and native
   projections; train language-layer LoRA with the reference LoRA settings.
-- Use the native processor and Thinker forward/generate. Limit integration code
-  to data serialization, label masks and original training/inference calls.
+- Call the published qwen-omni-utils process_mm_info directly for ONE original
+  video and its continuous embedded audio. Use native chat template, processor,
+  forward/generate with use_audio_in_video=True and the utility's returned FPS.
+  Pass reference 8-frame/224x224 budget as official utility parameters.
+  Do not write custom decoders/samplers/timestamp logic or revert to separate
+  images/eight audio clips. No independent WAV fallback or invented alignment.
+- Use the original AffectGPT textonly prompt branch only to obtain its existing
+  question/subtitle prose; native video messages supply the actual AV content.
+  Do not author new task prompts. Preserve original supervision and scoring.
+- Keep BaseTask.train_step and runner unchanged; only model signature/data
+  serialization/label masks/inference model calls belong in the interface.
 - The user authorized increased length capacity without reducing input or
   supervision: training 2048; inference total 4096; output budget remains 1200.
   Fail explicitly if exceeded; never silently truncate media or target answers.
@@ -28,5 +37,4 @@ encoders out or retain AffectGPT projection, aggregation or fusion modules.
 - Preserve trained weights and verify reconstruction. Distinguish CPU interface
   checks from full 7B/GPU training, evaluation and verified results.
 - Sync scoped changes directly to main in haoxu2525-tech/SFT-on-Qwen2.5Omni7B.
-  Do not create branches unless the user explicitly requests one.
-  Exclude unrelated parent-repository changes.
+  Do not create branches unless explicitly requested. Exclude unrelated changes.
