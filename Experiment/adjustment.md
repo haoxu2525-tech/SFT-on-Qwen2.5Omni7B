@@ -1,6 +1,6 @@
 # Native Omni Thinker SFT decisions
 
-Updated 2026-11-04 (Australia/Sydney).
+Updated 2026-11-04.
 
 ## Required correction: published Omni audio/video path
 
@@ -121,7 +121,7 @@ Historical AVERE exclusions and old Qwen scores do not define evaluation scope.
 
 ## Data inspection
 
-The two existing archives in C:/MerUniBench contain 38,416 file entries.
+The two existing dataset archives contain 38,416 file entries.
 Their names, uncompressed sizes and stored CRC values match all 38,416 entries
 in the existing retention inventory, with no missing/extra/mismatched entries.
 All 19 CSV/NPZ annotation files were read successfully with ZIP CRC verification.

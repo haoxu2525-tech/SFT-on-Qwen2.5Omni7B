@@ -9,7 +9,7 @@ Remember:
 
 4. The code we write in 'Fix blocker and errors' should only never touch variables and algorithms in Reproduction. We could only solve non-experimental issues when downloading and running on a rented device there.
 
-5. We should always synchronise our code in our github repositories for version control every time we finish editing files. I've connected HuggingFace and Github with OpenAi account as plugin so do not ask questions for login again.
+5. We should always synchronise our code in our github repositories for version control every time we finish editing files.
 
 6.do not create new files for new versions of existing files after we try to update for a new goal, just overwrite the existing file
 
@@ -17,17 +17,17 @@ Remember:
 
 8.all coding files in this folder should be really utilized in generation of our final version results
 
-9.We need a thorough pipeline program to run all needed programs on one go as Xu Hao is too busy to frequently check with Codex what have we done, but just arrange the compelete task on runpod and let the program run by itself till all results come out.
+9.The pipeline should run all required programs on Runpod through result generation without frequent manual intervention.
 
 10. There must exist discrepancies in availability to baseline papers as some files may require permission or be unopen to public route. List all the discrepancies carefully and wait for my decision about how we adjust our reproduction or experiment. These adjustments we make should be recorded in adjustment.md file.
 
-Current project override (2026-11-04, Australia/Sydney):
+Current project override (2026-11-04):
 Replace only AffectGPT's language backbone and audio/visual encoders with
 Qwen2.5-Omni-7B's corresponding components. Keep AffectGPT's projection,
 aggregation and fusion modules, trainability policy, data, supervision,
 training settings and evaluation unchanged. This is not a language-LoRA-only
 or end-to-end Omni replacement. Native component interfaces may be adapted in
 the existing Experiment/Experiment Code directory without editing official files.
-Any additional experimental change requires Xu Hao's decision. Preserve original
+Any additional experimental change requires the project maintainer's decision. Preserve original
 datasets/annotations and do not reuse retired Qwen artifacts. Other folder,
 storage and version-control requirements above remain in force.

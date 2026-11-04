@@ -113,5 +113,6 @@ Preserve runner checkpoints, exact Omni revision and processor, interface code,
 environment versions and preparation receipt together. Reconstruct the same frozen
 base and LoRA configuration before loading trained state. No retired v1/v2 checkpoint
 is accepted as a substitute for the corrected input interface. Historical
-reproduction notes remain verbatim; current AGENTS.md and adjustment.md override
+reproduction notes retain their technical content with personal details removed;
+current AGENTS.md and adjustment.md override
 their obsolete three-component-replacement instructions.
