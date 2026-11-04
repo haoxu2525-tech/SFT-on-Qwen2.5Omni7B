@@ -1,0 +1,12 @@
+__pycache__/
+.pytest_cache/
+.cache/
+.venv/
+.env
+.env.*
+cache/
+output/
+dataset/
+*.pth
+*.pt
+*.safetensors
