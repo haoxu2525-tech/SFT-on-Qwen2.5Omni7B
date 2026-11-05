@@ -321,7 +321,6 @@ def test_adapter_selects_bf16_autocast(monkeypatch):
     ["train", "--batch-size-train", "0"],
     ["train", "--batch-size-eval", "-1"],
     ["infer", "--batch-size-train", "1"],
-    ["infer", "--async-prefetch"],
 ])
 def test_batch_options_reject_invalid_requests(tmp_path, monkeypatch, flags):
     import sys
@@ -385,7 +384,6 @@ def test_execution_isolation(tmp_path, monkeypatch, retired_workflow):
 
 @pytest.mark.parametrize("stage,extra", [
     ("train", []), ("train", ["--batch-size-train", "1", "--batch-size-eval", "2"]),
-    ("train", ["--async-prefetch"]),
     ("infer", []),
     ("infer", ["--dataset", "MER2023", "--options", "inference.test_epoch=30"]),
     ("evaluate", []), ("score", []),
@@ -395,9 +393,8 @@ def test_launcher_dispatches_original_scripts(tmp_path, monkeypatch, stage, extr
     import sys
     import huggingface_hub
     import omni_components as bridge
-    import omni_prefetch
     import run_affectgpt_omni as launcher
-    calls, installs, prefetch_installs = [], [], []
+    calls, installs = [], []
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys, "path", list(sys.path))
     for key in ("HF_HOME", "HF_HUB_CACHE", "TRANSFORMERS_CACHE", "TORCH_HOME"):
@@ -405,13 +402,11 @@ def test_launcher_dispatches_original_scripts(tmp_path, monkeypatch, stage, extr
     monkeypatch.setattr(launcher, "prepare_execution", lambda *args: SOURCE)
     monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda *args, **kwargs: "test-snapshot")
     monkeypatch.setattr(bridge, "install", lambda snapshot: installs.append(snapshot))
-    monkeypatch.setattr(omni_prefetch, "install_async_prefetch", lambda: prefetch_installs.append(True))
     monkeypatch.setattr(launcher.runpy, "run_path", lambda path, **kwargs: calls.append((path, list(sys.argv))))
     monkeypatch.setattr(sys, "argv", ["launcher", stage, "--runtime", str(tmp_path),
                                     "--dataset-root", str(tmp_path),
                                     *([] if stage == "train" else ["--"]), *extra])
     launcher.main()
-    assert prefetch_installs == ([True] if "--async-prefetch" in extra else [])
     path, argv = calls[0]
     assert Path(path) == SOURCE / launcher.SCRIPTS[stage]
     if stage in {"evaluate", "score"}:
@@ -421,16 +416,14 @@ def test_launcher_dispatches_original_scripts(tmp_path, monkeypatch, stage, extr
     assert argv[1:3] == ["--cfg-path", launcher.REFERENCE_CONFIG]
     if stage == "train":
         expected = ["run.amp=False"]
-        has_batch = "--batch-size-train" in extra
-        if has_batch:
+        if extra:
             expected += ["run.batch_size_train=1", "run.batch_size_eval=2"]
         assert argv[3:] == ["--options", *expected]
         record = json.loads((tmp_path/"training-options.json").read_text())
         assert record["precision"] == "bfloat16" and record["gradient_scaling"] is False
-        assert record["batch_size_train"] == (1 if has_batch else 3)
-        assert record["batch_size_eval"] == (2 if has_batch else 3)
+        assert record["batch_size_train"] == (1 if extra else 3)
+        assert record["batch_size_eval"] == (2 if extra else 3)
         assert record["train_max_length"] == TRAIN_MAX_LENGTH == 4096
-        assert record["async_prefetch"] == ("--async-prefetch" in extra)
         return
     # Execute the ACTUAL original argparse statements against dispatched argv.
     tree = ast.parse((SOURCE / "inference_hybird.py").read_text(encoding="utf-8"))

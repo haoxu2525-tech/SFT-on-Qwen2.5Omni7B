@@ -100,15 +100,11 @@ def main():
                         help="Per-GPU training batch size; default is the reference 3; lower after OOM")
     parser.add_argument("--batch-size-eval", type=positive_int,
                         help="Runner evaluation batch size; default is the reference 3")
-    parser.add_argument("--async-prefetch", action="store_true",
-                        help="Train only: ordered background loading and asynchronous pinned CUDA transfer")
     args, original_args = parser.parse_known_args()
     if original_args[:1] == ["--"]:
         original_args = original_args[1:]
     if args.stage != "train" and (args.batch_size_train is not None or args.batch_size_eval is not None):
         parser.error("Batch-size options apply only to the train stage")
-    if args.async_prefetch and args.stage != "train":
-        parser.error("Async prefetch applies only to the train stage")
     if args.stage in {"train", "prepare"} and original_args:
         parser.error("No training overrides are allowed; the original YAML is used verbatim")
     if args.stage in {"evaluate", "score"} and original_args:
@@ -134,9 +130,6 @@ def main():
         snapshot = snapshot_download(MODEL_ID, revision=MODEL_REVISION,
                                      cache_dir=str(runtime / "cache" / "omni"))
         install(snapshot)
-        if args.async_prefetch:
-            from omni_prefetch import install_async_prefetch
-            install_async_prefetch()
     script = SCRIPTS[args.stage]
     sys.argv = [script]
     if args.stage in {"train", "infer"}:
@@ -153,7 +146,6 @@ def main():
         (runtime / "training-options.json").write_text(json.dumps({
             "workflow": WORKFLOW, "precision": "bfloat16", "gradient_scaling": False,
             "train_max_length": TRAIN_MAX_LENGTH, "config_overrides": overrides,
-            "async_prefetch": args.async_prefetch,
             "batch_size_train": args.batch_size_train if args.batch_size_train is not None else 3,
             "batch_size_eval": args.batch_size_eval if args.batch_size_eval is not None else 3,
         }, indent=2) + "\n", encoding="utf-8")
